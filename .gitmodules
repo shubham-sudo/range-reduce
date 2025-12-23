@@ -1,0 +1,7 @@
+[submodule "lib/rocksdb"]
+	path = lib/rocksdb
+	url = https://github.com/SSD-Brandeis/RocksDB-SSD.git
+	branch = RangeReduce
+[submodule "lib/tectonic"]
+	path = lib/tectonic
+	url = https://github.com/SSD-Brandeis/Tectonic.git

@@ -1,0 +1,810 @@
+/*
+ *  Created on: May 14, 2019
+ *  Author: Subhadeep, Papon
+ */
+
+#include <iostream>
+#include <cmath>
+#include <sys/time.h>
+#include <vector>
+#include <cstdlib>
+#include <algorithm>
+#include <iomanip>
+
+#include "emu_environment.h"
+#include "tree_builder.h"
+#include "workload_executor.h"
+#include "memtable.h"
+#include "vector_memtable.h"
+#include "query_stats.h"
+
+using namespace std;
+using namespace tree_builder;
+using namespace workload_exec;
+
+/*Set up the singleton object with the experiment wide options*/
+MemoryBuffer *MemoryBuffer::buffer_instance = 0;
+long MemoryBuffer::max_buffer_size = 0;
+float MemoryBuffer::buffer_flush_threshold = 0;
+long MemoryBuffer::current_buffer_entry_count = 0;
+long MemoryBuffer::current_buffer_size = 0;
+float MemoryBuffer::current_buffer_saturation = 0;
+int MemoryBuffer::buffer_flush_count = 0;
+MemTable *MemoryBuffer::buffer = new VectorMemTable();
+
+int MemoryBuffer::verbosity = 0;
+
+// SSTFile* DiskMetaFile::head_level_1 = NULL;
+SSTFile *DiskMetaFile::level_head[32] = {};
+long DiskMetaFile::level_min_key[32] = {};
+long DiskMetaFile::level_max_key[32] = {};
+long DiskMetaFile::level_file_count[32] = {};
+long DiskMetaFile::level_entry_count[32] = {};
+long DiskMetaFile::level_max_size[32] = {};
+long DiskMetaFile::level_max_file_count[32] = {};
+long DiskMetaFile::level_current_size[32] = {};
+int DiskMetaFile::last_level = 1;
+
+long DiskMetaFile::global_level_file_counter[32] = {};
+float DiskMetaFile::disk_run_flush_threshold[32] = {};
+
+int DiskMetaFile::compaction_counter[32] = {};
+int DiskMetaFile::compaction_through_sortmerge_counter[32] = {};
+int DiskMetaFile::compaction_through_point_manipulation_counter[32] = {};
+int DiskMetaFile::compaction_file_counter[32] = {};
+
+// int generateMetaData(SSTFile *file, DeleteTile &deletetile, Page &page, long sort_key_to_insert, long delete_key_to_insert);
+
+// CLASS : MemoryBuffer
+
+MemoryBuffer::MemoryBuffer(EmuEnv *_env)
+{
+  max_buffer_size = _env->buffer_size;
+  buffer_flush_threshold = _env->buffer_flush_threshold;
+  verbosity = _env->verbosity;
+  int entries_per_file = _env->entries_per_page * _env->buffer_size_in_pages;
+
+  for (int i = 1; i < 32; ++i)
+  {
+    DiskMetaFile::disk_run_flush_threshold[i] = _env->disk_run_flush_threshold;
+    DiskMetaFile::level_max_size[i] = _env->buffer_size * pow(_env->size_ratio, i);
+    DiskMetaFile::level_max_file_count[i] = DiskMetaFile::level_max_size[i] / (entries_per_file * _env->entry_size);
+  }
+}
+
+MemoryBuffer *MemoryBuffer::getBufferInstance(EmuEnv *_env)
+{
+  if (buffer_instance == 0)
+    buffer_instance = new MemoryBuffer(_env);
+
+  return buffer_instance;
+}
+
+int MemoryBuffer::setCurrentBufferStatistics(int entry_count_change, int entry_size_change)
+{
+  current_buffer_entry_count += entry_count_change;
+  current_buffer_size += entry_size_change;
+  current_buffer_saturation = (float)current_buffer_size / max_buffer_size;
+
+  return 1;
+}
+
+int MemoryBuffer::getCurrentBufferStatistics()
+{
+  std::cout << "********** PRINTING CURRENT BUFFER STATISTICS **********" << std::endl;
+  std::cout << "Current buffer entry count = " << current_buffer_entry_count << std::endl;
+  std::cout << "Current buffer size = " << current_buffer_size << std::endl;
+  std::cout << "Current buffer saturation = " << current_buffer_saturation << std::endl;
+  std::cout << "Update count = " << WorkloadExecutor::buffer_update_count << std::endl;
+  std::cout << "Total buffer flushes  = " << buffer_flush_count << std::endl;
+  std::cout << "********************************************************" << std::endl;
+  return 1;
+}
+
+int MemoryBuffer::initiateBufferFlush(int level_to_flush_in)
+{
+  if (MemoryBuffer::verbosity == 2)
+    cout << "Calling sort and write from Buffer............................" << endl;
+  Utility::sortAndWrite(MemoryBuffer::buffer->entries, level_to_flush_in);
+  MemoryBuffer::buffer_flush_count++;
+  return 1;
+}
+
+// Class DiskMetaFile
+
+int DiskMetaFile::getLevelFileCount(int level)
+{
+  SSTFile *level_head = DiskMetaFile::getSSTFileHead(level);
+  SSTFile *moving_head = level_head;
+  long level_size_in_files = 0;
+  while (moving_head)
+  {
+    level_size_in_files++;
+    moving_head = moving_head->next_file_ptr;
+  }
+  return level_size_in_files;
+}
+
+// int DiskMetaFile::getTotalPageCount()
+// {
+//   int counter = 0;
+//   for (int i = 1; i <= DiskMetaFile::getTotalLevelCount(); i++)
+//   {
+//     SSTFile *level_i_head = DiskMetaFile::getSSTFileHead(i);
+//     SSTFile *moving_head = level_i_head;
+//     while (moving_head)
+//     {
+//       for (int k = 0; k < moving_head->tile_vector.size(); k++)
+//       {
+//         DeleteTile delete_tile = moving_head->tile_vector[k];
+//         for (int l = 0; l < delete_tile.page_vector.size(); l++)
+//         {
+//           counter++;
+//         }
+//       }
+//       moving_head = moving_head->next_file_ptr;
+//     }
+//   }
+//   return counter;
+// }
+
+long DiskMetaFile::getLevelEntryCount(int level)
+{
+  SSTFile *level_head = DiskMetaFile::getSSTFileHead(level);
+  SSTFile *moving_head = level_head;
+  long level_size_in_entries = 0;
+  while (moving_head)
+  {
+    for (int k = 0; k < moving_head->pages.size(); k++)
+    {
+      Page *page = moving_head->pages[k];
+      for (int m = 0; m < page->entries_vector.size(); m++)
+      {
+        level_size_in_entries++;
+      }
+    }
+    moving_head = moving_head->next_file_ptr;
+  }
+  return level_size_in_entries;
+}
+
+int DiskMetaFile::getTotalLevelCount()
+{
+  int level_count = 0;
+  for (int i = 1; i <= 32; i++)
+  {
+    SSTFile *level_head = DiskMetaFile::getSSTFileHead(i);
+    if (level_head)
+    {
+      level_count++;
+    }
+    else
+    {
+      return level_count;
+    }
+  }
+  return level_count;
+}
+
+vector<int> DiskMetaFile::getNonEmptyLevels()
+{
+  vector<int> non_empty_levels{};
+
+  for (int i = 1; i <= 32; i++)
+  {
+    SSTFile *level_head = DiskMetaFile::getSSTFileHead(i);
+    if (level_head)
+    {
+      non_empty_levels.push_back(i);
+    }
+  }
+
+  return non_empty_levels;
+}
+
+int DiskMetaFile::checkOverlapping(SSTFile *file, int next_level)
+{
+  SSTFile *next_level_head = DiskMetaFile::getSSTFileHead(next_level);
+  SSTFile *moving_head = next_level_head;
+
+  int overlap_files_count = 0;
+  while (moving_head)
+  {
+    if (moving_head->max_sort_key <= file->min_sort_key || moving_head->min_sort_key >= file->max_sort_key)
+    {
+      moving_head = moving_head->next_file_ptr;
+      continue;
+    }
+    overlap_files_count++;
+    moving_head = moving_head->next_file_ptr;
+  }
+
+  return overlap_files_count;
+}
+
+void DiskMetaFile::shiftLevelAndIncreaseSize(int level)
+{
+  DiskMetaFile::getMetaStatistics();
+  // int start_level = level + 1;
+  // SSTFile *last_level = DiskMetaFile::level_head[start_level];
+
+  // if (MemoryBuffer::verbosity >= 1)
+  // {
+  //   std::cout << "Shifting level: " << start_level - 1 << " to level: " << start_level << std::endl;
+  // }
+  // DiskMetaFile::level_head[start_level] = DiskMetaFile::level_head[start_level - 1];
+
+  // if (MemoryBuffer::verbosity >= 1)
+  // {
+  //   std::cout << "Setting level: " << level << " to NULL" << std::endl;
+  // }
+  // DiskMetaFile::level_head[level] = nullptr;
+  // DiskMetaFile::printAllEntries(1);
+
+  int start_level = level + 1;
+  
+  while (start_level > 1)
+  {
+    if (MemoryBuffer::verbosity >= 1)
+    {
+      std::cout << "Shifting level: " << start_level - 1 << " to level: " << start_level << std::endl;
+    }
+    DiskMetaFile::level_head[start_level] = DiskMetaFile::level_head[start_level - 1];
+    start_level -= 1;
+  }
+
+  if (MemoryBuffer::verbosity >= 1)
+  {
+    std::cout << "Setting level: " << start_level << " to NULL" << std::endl;
+  }
+  DiskMetaFile::level_head[start_level] = nullptr;
+  DiskMetaFile::last_level += 1;
+  DiskMetaFile::printAllEntries(1);
+  DiskMetaFile::getMetaStatistics();
+}
+
+int DiskMetaFile::checkAndAdjustLevelSaturation(int level)
+{
+  int entry_count_in_level = getLevelEntryCount(level);
+  int file_count_in_level = getLevelFileCount(level);
+  EmuEnv *_env = EmuEnv::getInstance();
+  int max_entry_count_in_level = DiskMetaFile::level_max_size[level] / _env->entry_size;
+  int max_file_count_in_level = DiskMetaFile::level_max_file_count[level];
+  while (file_count_in_level >= max_file_count_in_level)
+  {
+    if (MemoryBuffer::verbosity == 2)
+      std::cout << "Saturation Reached......" << endl;
+
+    if (_env->enable_level_shifting && level == DiskMetaFile::last_level)
+    {
+      DiskMetaFile::shiftLevelAndIncreaseSize(level);
+    }
+    // if (_env->enable_level_shifting && DiskMetaFile::level_head[level+1] == nullptr)
+    // {
+    //   DiskMetaFile::shiftLevelAndIncreaseSize(level);
+    // }
+
+    else
+    {
+      // Push the file with minimum overlapping into the next level
+      SSTFile *level_head = DiskMetaFile::getSSTFileHead(level);
+      SSTFile *moving_head = level_head;
+      // SSTFile *moving_head_prev = level_head;
+      SSTFile *min_overlap_file = level_head;
+      int overlap;
+      int min_overlap = INT32_MAX;
+      // cout << "Level: " << level << " Overlap Count : " << endl;
+      while (moving_head)
+      {
+        overlap = DiskMetaFile::checkOverlapping(moving_head, level + 1);
+        // cout << overlap << endl;
+        if (overlap < min_overlap)
+        {
+          min_overlap = overlap;
+          min_overlap_file = moving_head;
+        }
+        moving_head = moving_head->next_file_ptr;
+      }
+
+      // DiskMetaFile::setSSTFileHead(level_head->next_file_ptr, level);
+
+      // If that file is level head, update head
+      if (min_overlap_file == level_head)
+      {
+        DiskMetaFile::setSSTFileHead(level_head->next_file_ptr, level);
+      }
+
+      moving_head = level_head;
+      // moving_head_prev = level_head;
+
+      while (moving_head)
+      {
+        if (moving_head->next_file_ptr == min_overlap_file)
+        {
+          moving_head->next_file_ptr = min_overlap_file->next_file_ptr;
+        }
+        moving_head = moving_head->next_file_ptr;
+      }
+
+      // Converting to vector (only that file)
+      vector<Entry *> vector_to_compact;
+
+      for (int k = 0; k < min_overlap_file->pages.size(); k++)
+      {
+        Page *page = min_overlap_file->pages[k];
+        for (int m = 0; m < page->entries_vector.size(); m++)
+        {
+          vector_to_compact.push_back(&page->entries_vector[m]);
+        }
+      }
+
+      // Sending it to next level.
+      if (MemoryBuffer::verbosity == 2)
+      {
+        cout << "Level : " << level << " Calling sort and write from Disk Saturation Checker............................" << endl;
+        for (int j = 0; j < vector_to_compact.size(); ++j)
+          std::cout << "< " << vector_to_compact[j]->getKey() << ",  " << vector_to_compact[j]->getValue() << " >"
+                    << "\t" << std::endl;
+      }
+
+      Utility::sortAndWrite(vector_to_compact, level + 1);
+    }
+
+    // Check again to the same level
+    entry_count_in_level = getLevelEntryCount(level);
+    file_count_in_level = getLevelFileCount(level);
+  }
+  return 1;
+}
+
+int DiskMetaFile::setSSTFileHead(SSTFile *arg, int level_to_flush_in)
+{
+  // std::cout << "Printing 2 :: " << arg->file_id  << std::endl ;
+  DiskMetaFile::level_head[level_to_flush_in] = arg;
+  // std::cout << "Printing 3 :: " << DiskMetaFile::head_level_1->file_id  << std::endl ;
+  return 1;
+}
+
+SSTFile *DiskMetaFile::getSSTFileHead(int level)
+{
+  return DiskMetaFile::level_head[level];
+}
+
+// int SSTFile::PopulateDeleteTile(SSTFile *file, vector<pair<pair<long, long>, string>> vector_to_populate_tile, int deletetileid, int level_to_flush_in)
+// {
+//   if (MemoryBuffer::verbosity == 2)
+//     std::cout << "In PopulateDeleteTile() ... " << std::endl;
+
+//   EmuEnv *_env = EmuEnv::getInstance();
+//   // int page_count = _env->delete_tile_size_in_pages;
+//   // int page_count = _env->getDeleteTileSize(level_to_flush_in);
+//   int page_count;
+//   page_count = file->tile_vector[deletetileid].page_vector.size();
+
+//   int entries_per_page = _env->entries_per_page;
+//   for (int i = 0; i < page_count; ++i)
+//   {
+//     vector<pair<pair<long, long>, string>> vector_to_populate_page;
+//     entries_per_page = Utility::minInt(entries_per_page, vector_to_populate_tile.size());
+//     for (int j = 0; j < entries_per_page; ++j)
+//     {
+//       vector_to_populate_page.push_back(vector_to_populate_tile[j]);
+//     }
+
+//     std::sort(vector_to_populate_page.begin(), vector_to_populate_page.end(), Utility::sortbysortkey);
+
+//     if (MemoryBuffer::verbosity == 2)
+//     {
+//       std::cout << "\npopulating pages :: vector length = " << vector_to_populate_tile.size() << std::endl;
+//       std::cout << "\nEntries per page = " << entries_per_page << std::endl;
+//     }
+
+//     for (int j = 0; j < entries_per_page; ++j)
+//     {
+//       long sort_key_to_insert = vector_to_populate_page[j].first.first;
+//       long delete_key_to_insert = vector_to_populate_page[j].first.second;
+
+//       int status = generateMetaData(file, file->tile_vector[deletetileid],
+//                                     file->tile_vector[deletetileid].page_vector[i], sort_key_to_insert, delete_key_to_insert);
+
+//       file->tile_vector[deletetileid].page_vector[i].kv_vector.push_back(make_pair(make_pair(
+//                                                                                        vector_to_populate_page[j].first.first, vector_to_populate_page[j].first.second),
+//                                                                                    vector_to_populate_page[j].second));
+
+//       if (MemoryBuffer::verbosity == 2)
+//         std::cout << vector_to_populate_page[j].first.first << " " << vector_to_populate_page[j].first.second << std::endl;
+//     }
+
+//     vector_to_populate_tile.erase(vector_to_populate_tile.begin(), vector_to_populate_tile.begin() + entries_per_page);
+
+//     if (MemoryBuffer::verbosity == 2)
+//       std::cout << "populated pages\n"
+//                 << std::endl;
+
+//     vector_to_populate_page.clear();
+//   }
+
+//   return 1;
+// }
+
+// vector<DeleteTile> DeleteTile::createNewDeleteTiles(int delete_tile_count_in_a_file, int level_to_flush_in)
+// {
+//   EmuEnv *_env = EmuEnv::getInstance();
+//   vector<DeleteTile> delete_tiles(delete_tile_count_in_a_file);
+//   for (int i = 0; i < delete_tiles.size(); i++)
+//   {
+//     delete_tiles[i].max_sort_key = -1;
+//     delete_tiles[i].min_sort_key = -1;
+//     delete_tiles[i].max_delete_key = -1;
+//     delete_tiles[i].min_delete_key = -1;
+//     if (_env->buffer_size_in_pages % _env->getDeleteTileSize(level_to_flush_in) == 0)
+//     {
+//       delete_tiles[i].page_vector = Page::createNewPages(_env->getDeleteTileSize(level_to_flush_in));
+//     }
+//     else
+//     {
+//       if (i == delete_tiles.size() - 1)
+//       {
+//         delete_tiles[i].page_vector = Page::createNewPages(_env->buffer_size_in_pages % _env->getDeleteTileSize(level_to_flush_in));
+//       }
+//       else
+//       {
+//         delete_tiles[i].page_vector = Page::createNewPages(_env->getDeleteTileSize(level_to_flush_in));
+//       }
+//     }
+//   }
+
+//   return delete_tiles;
+// }
+
+// int generateMetaData(SSTFile *file, DeleteTile &deletetile, Page &page, long sort_key_to_insert, long delete_key_to_insert)
+// {
+//   if (file->min_sort_key < 0 || sort_key_to_insert < file->min_sort_key)
+//   {
+//     file->min_sort_key = sort_key_to_insert;
+//   }
+
+//   if (file->max_sort_key < 0 || sort_key_to_insert > file->max_sort_key)
+//   {
+//     file->max_sort_key = sort_key_to_insert;
+//   }
+
+//   if (file->min_delete_key < 0 || delete_key_to_insert < file->min_delete_key)
+//   {
+//     file->min_delete_key = delete_key_to_insert;
+//   }
+
+//   if (file->max_delete_key < 0 || delete_key_to_insert > file->max_delete_key)
+//   {
+//     file->max_delete_key = delete_key_to_insert;
+//   }
+
+//   if (deletetile.min_sort_key < 0 || sort_key_to_insert < deletetile.min_sort_key)
+//   {
+//     deletetile.min_sort_key = sort_key_to_insert;
+//   }
+
+//   if (deletetile.max_sort_key < 0 || sort_key_to_insert > deletetile.max_sort_key)
+//   {
+//     deletetile.max_sort_key = sort_key_to_insert;
+//   }
+
+//   if (deletetile.min_delete_key < 0 || delete_key_to_insert < deletetile.min_delete_key)
+//   {
+//     deletetile.min_delete_key = delete_key_to_insert;
+//   }
+
+//   if (deletetile.max_delete_key < 0 || delete_key_to_insert > deletetile.max_delete_key)
+//   {
+//     deletetile.max_delete_key = delete_key_to_insert;
+//   }
+
+//   if (page.min_sort_key < 0 || sort_key_to_insert < page.min_sort_key)
+//   {
+//     page.min_sort_key = sort_key_to_insert;
+//   }
+
+//   if (page.max_sort_key < 0 || sort_key_to_insert > page.max_sort_key)
+//   {
+//     page.max_sort_key = sort_key_to_insert;
+//   }
+//   if (page.min_delete_key < 0 || delete_key_to_insert < page.min_delete_key)
+//   {
+//     page.min_delete_key = delete_key_to_insert;
+//   }
+
+//   if (page.max_delete_key < 0 || delete_key_to_insert > page.max_delete_key)
+//   {
+//     page.max_delete_key = delete_key_to_insert;
+//   }
+
+//   return 1;
+// }
+
+int MemoryBuffer::printBufferEntries()
+{
+  long size = 0;
+  std::cout << "Printing sorted buffer (only keys): ";
+  // std::cout << MemoryBuffer::buffer.size() << std::endl;
+  std::sort(MemoryBuffer::buffer->entries.begin(), MemoryBuffer::buffer->entries.end(), Utility::sortbysortkey); // COMMENT
+  for (int i = 0; i < MemoryBuffer::buffer->entries.size(); ++i)
+  {
+    std::cout << "< " << MemoryBuffer::buffer->entries[i]->getKey() << ",  " << MemoryBuffer::buffer->entries[i]->getValue() << " >"
+              << "\t";
+    size += (2 * sizeof(MemoryBuffer::buffer->entries[i]->getKey().size()) + MemoryBuffer::buffer->entries[i]->getValue().size());
+  }
+  std::cout << std::endl;
+  // std::cout << "Buffer size = " << size << std::endl;
+
+  return 1;
+}
+
+int DiskMetaFile::getTotalEntriesCount()
+{
+  long total_entry_count = 0;
+  for (int i : DiskMetaFile::getNonEmptyLevels())
+  {
+    total_entry_count += DiskMetaFile::getLevelEntryCount(i);
+  }
+  return total_entry_count;
+}
+
+void DiskMetaFile::getMetaStatistics()
+{
+  std::cout << "**************************** PRINTING META FILE STATISTICS ****************************" << std::endl;
+
+  std::cout << "\nTotal number of entries: " << DiskMetaFile::getTotalEntriesCount() << "\n"
+            << std::endl;
+  std::cout << "L\tfile_count\tentry_count\t\tSaturation" << std::endl;
+  for (int i : DiskMetaFile::getNonEmptyLevels())
+  {
+    std::cout << i << "\t" << setfill(' ') << setw(8) << DiskMetaFile::getLevelFileCount(i) << "\t\t"
+              << DiskMetaFile::getLevelEntryCount(i) << "\t\t" << (((float)DiskMetaFile::getLevelEntryCount(i) * 8 / DiskMetaFile::level_max_size[i])) << std::endl;
+  }
+  std::cout << "***************************************************************************************" << std::endl;
+}
+
+// int DiskMetaFile::getMetaStatistics()
+// {
+//   std::cout << "**************************** PRINTING META FILE STATISTICS ****************************" << std::endl;
+//   std::cout << "L\tmin_key\t\tmax_key\t\tfile_count\tentry_count\tlevel_size" << std::endl;
+//   for (int i = 1; i < 32 && DiskMetaFile::level_head[i]; ++i)
+//   {
+//     std::cout << i << "\t" << setfill(' ') << setw(8) << DiskMetaFile::level_min_key[i] << "\t"
+//               << setfill(' ') << setw(8) << DiskMetaFile::level_max_key[i] << "\t\t" << DiskMetaFile::level_file_count[i] << "\t\t"
+//               << DiskMetaFile::level_entry_count[i] << "\t\t" << DiskMetaFile::level_current_size[i] << std::endl;
+//   }
+//   std::cout << "***************************************************************************************" << std::endl;
+
+//   // Printing COMPACTION statistics -- these stats are not set by setMetaStatistics()
+//   int total_compactions = 0;
+//   int total_compactions_through_sortmerge = 0;
+//   int total_compactions_through_pointer_manipulation = 0;
+//   int total_files_in_compaction = 0;
+//   std::cout << "L\t#compactions\t#compactions_through_sortmerge\t#compactions_through_pointer_manipulation\t#files_in_compaction\t#bytes_in_compaction" << std::endl;
+//   for (int i = 1; i < 32 && DiskMetaFile::level_head[i]; ++i)
+//   {
+//     total_compactions += DiskMetaFile::compaction_counter[i];
+//     total_files_in_compaction += DiskMetaFile::compaction_file_counter[i];
+//     total_compactions_through_sortmerge += DiskMetaFile::compaction_through_sortmerge_counter[i];
+//     total_compactions_through_pointer_manipulation += DiskMetaFile::compaction_through_point_manipulation_counter[i];
+
+//     std::cout << i + 1 << "\t" << setfill(' ') << setw(8) << DiskMetaFile::compaction_counter[i] << "\t\t"
+//               << setfill(' ') << setw(8) << DiskMetaFile::compaction_through_sortmerge_counter[i] << "\t\t\t"
+//               << setfill(' ') << setw(8) << DiskMetaFile::compaction_through_point_manipulation_counter[i] << "\t\t\t\t"
+//               << setfill(' ') << setw(8) << DiskMetaFile::compaction_file_counter[i] << "\t\t\t"
+//               << setfill(' ') << setw(12) << DiskMetaFile::compaction_file_counter[i] * 4 * 128 << std::endl;
+//   }
+//   std::cout << "Total"
+//             << "\t" << setfill(' ') << setw(8) << total_compactions << "\t\t"
+//             << setfill(' ') << setw(8) << total_compactions_through_sortmerge << "\t\t\t"
+//             << setfill(' ') << setw(8) << total_compactions_through_pointer_manipulation << "\t\t\t\t"
+//             << setfill(' ') << setw(8) << total_files_in_compaction << "\t\t\t"
+//             << setfill(' ') << setw(12) << (long)total_files_in_compaction * 4 * 128 << std::endl;
+//   return 1;
+// }
+
+int DiskMetaFile::printAllEntries(int only_file_meta_data)
+{
+
+  EmuEnv *_env = EmuEnv::getInstance();
+  std::cout << "**************************** PARAMETERS ****************************" << std::endl;
+  std::cout << "Buffer size in pages (P): " << _env->buffer_size_in_pages << std::endl;
+  std::cout << "Entries per pages (B): " << _env->entries_per_page << std::endl;
+  std::cout << "Entry Size (E): " << _env->entry_size << std::endl;
+  std::cout << "Buffer Size (PBE): " << _env->buffer_size << std::endl;
+  std::cout << "Delete Tile Size in Pages (H): " << _env->delete_tile_size_in_pages << std::endl;
+  std::cout << "Size Ratio: " << _env->size_ratio << std::endl;
+  std::cout << "********************************************************************\n"
+            << std::endl;
+
+  std::cout << "*************************************************** PRINTING ALL ENTRIES *********************************************************\n"
+            << std::endl;
+  std::cout << "\033[1;31mBuffer : "
+            << "\033[0m" << std::endl;
+  if (MemoryBuffer::current_buffer_entry_count == 0)
+  {
+    std::cout << "\t\t\t\tBuffer is currently empty." << std::endl;
+  }
+  else
+  { // UNCOMMENT
+    std::cout << "\t\t\t\tBuffer entry count: " << MemoryBuffer::current_buffer_entry_count << std::endl;
+    // Uncomment the following to print all entries
+    for (int i = 0; i < MemoryBuffer::current_buffer_entry_count; i++)
+    {
+      std::string type_name;
+      switch (MemoryBuffer::buffer->entries[i]->getType())
+      {
+      case EntryType::POINT_ENTRY:
+        type_name = "Point Entry";
+        break;
+      case EntryType::POINT_TOMBSTONE:
+        type_name = "Point Tombstone";
+        break;
+      default:
+        break;
+      }
+      std::cout << "\t\t\t\tEntry : " << i << " (Sort_Key : " << MemoryBuffer::buffer->entries[i]->getKey()
+                << ", Value : " << MemoryBuffer::buffer->entries[i]->getValue()
+                << ", Type : " << type_name << ")" << std::endl;
+    }
+  }
+
+  for (int i : DiskMetaFile::getNonEmptyLevels())
+  {
+    SSTFile *level_i_head = DiskMetaFile::getSSTFileHead(i);
+    SSTFile *moving_head = level_i_head;
+
+    std::cout << "\033[1;31mLevel : " << i << "\033[0m" << std::endl;
+    while (moving_head)
+    {
+      std::cout << "\033[1;34m\tFile : " << moving_head->file_id << " (Min_Sort_Key : " << moving_head->min_sort_key
+                << ", Max_Sort_Key : " << moving_head->max_sort_key << ")"
+                << "\033[0m" << std::endl;
+      if (!only_file_meta_data)
+      {
+        for (int k = 0; k < moving_head->pages.size(); k++)
+        {
+          Page *page = moving_head->pages[k];
+          std::cout << "\033[1;32m\tPage : " << k << " (Min_Sort_Key : " << page->min_sort_key
+                    << ", Max_Sort_Key : " << page->max_sort_key << ")"
+                    << "\033[0m" << std::endl;
+
+          std::cout << "\t\t\t\tEntry count: " << page->entries_vector.size() << std::endl;
+
+          for (int m = 0; m < page->entries_vector.size(); m++)
+          {
+            std::string type_name;
+            switch (page->entries_vector[m].getType())
+            {
+            case EntryType::POINT_ENTRY:
+              type_name = "Point Entry";
+              break;
+            case EntryType::POINT_TOMBSTONE:
+              type_name = "Point Tombstone";
+              break;
+            default:
+              break;
+            }
+            std::cout << "\t\t\t\tEntry : " << m << " (Sort_Key : " << page->entries_vector[m].getKey()
+                      << ", Value : " << page->entries_vector[m].getValue()
+                      << ", Type : " << type_name << ")" << std::endl;
+          }
+        }
+      }
+      moving_head = moving_head->next_file_ptr;
+    }
+  }
+  std::cout << "\n**********************************************************************************************************************************\n"
+            << std::endl;
+  return 1;
+}
+
+int DiskMetaFile::clearAllEntries()
+{
+  cout << "Clearing previously created tree..." << endl;
+  EmuEnv *_env = EmuEnv::getInstance();
+
+  MemoryBuffer::buffer->entries.clear();
+  MemoryBuffer::current_buffer_entry_count = 0;
+  MemoryBuffer::current_buffer_saturation = 0;
+  MemoryBuffer::current_buffer_size = 0;
+  MemoryBuffer::buffer_flush_count = 0;
+
+  for (int i = 1; i <= 32; i++)
+  {
+    SSTFile *level_i_head = DiskMetaFile::getSSTFileHead(i);
+    SSTFile *moving_head = level_i_head;
+    SSTFile *moving_head_prev = level_i_head;
+
+    while (moving_head)
+    {
+      moving_head_prev = moving_head;
+      for (int k = 0; k < moving_head->pages.size(); k++)
+      {
+        Page *page = moving_head->pages[k];
+        page->entries_vector.clear();
+        page->min_sort_key = nullptr;
+        page->max_sort_key = nullptr;
+      }
+      moving_head->pages.clear();
+      moving_head->max_sort_key = nullptr;
+      moving_head->min_sort_key = nullptr;
+
+      moving_head = moving_head->next_file_ptr;
+      moving_head_prev->next_file_ptr = NULL;
+      // delete(moving_head_prev->next_file_ptr);
+      free(moving_head_prev);
+    }
+    // delete(level_i_head);
+    DiskMetaFile::setSSTFileHead(NULL, i);
+  }
+  return 1;
+}
+
+namespace tree_builder
+{
+  SSTFile *trivialFileMoveForIterator(SSTFile *head, vector<Entry *> &entries_to_flush, int level_to_flush_in, int file_count, int entries_per_file)
+  {
+    SSTFile *moving_head = head;
+    for (int i = 0; i < file_count; i++) // Though this is not required because on each entry saturation is checked and this would trigger compaction
+    {
+      vector<Entry *> vector_to_populate_file;
+      entries_per_file = std::min(entries_per_file, (int)entries_to_flush.size());
+
+      for (int j = 0; j < entries_per_file; ++j)
+      {
+        vector_to_populate_file.push_back(entries_to_flush[j]);
+      }
+
+      entries_to_flush.erase(entries_to_flush.begin(), entries_to_flush.begin() + entries_per_file);
+      SSTFile *new_file = SSTFile::createNewSSTFile(vector_to_populate_file.size(), level_to_flush_in);
+
+      qstats->num_files_written_during_range_query += 1;
+      std::for_each(new_file->pages.begin(), new_file->pages.end(), [](Page *page)
+                    {
+        qstats->num_pages_written_during_range_query += 1;
+        qstats->num_entries_written_during_range_query += page->entries_vector.size(); });
+
+      if (moving_head == nullptr)
+      {
+        moving_head = new_file;
+        DiskMetaFile::setSSTFileHead(moving_head, level_to_flush_in);
+        int status = SSTFile::PopulateFile(new_file, vector_to_populate_file, level_to_flush_in);
+      }
+      else
+      {
+        int status = SSTFile::PopulateFile(new_file, vector_to_populate_file, level_to_flush_in);
+        moving_head->next_file_ptr = new_file;
+        moving_head = new_file;
+      }
+      vector_to_populate_file.clear();
+    }
+    return moving_head;
+  }
+
+  std::string getMinKeyFromSSTFile(SSTFile *sst_file)
+  {
+    for (Page *page : sst_file->pages)
+    {
+      for (Entry entry : page->entries_vector)
+      {
+        return entry.getKey();
+      }
+    }
+    return std::string();
+  }
+
+  std::string getMaxKeyFromSSTFile(SSTFile *sst_file)
+  {
+    for (Page *page : std::vector<Page *>(sst_file->pages.rbegin(), sst_file->pages.rend()))
+    {
+      for (Entry entry : std::vector<Entry>(page->entries_vector.rbegin(), page->entries_vector.rend()))
+      {
+        return entry.getKey();
+      }
+    }
+    return std::string();
+  }
+
+}

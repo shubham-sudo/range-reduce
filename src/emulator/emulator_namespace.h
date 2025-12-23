@@ -1,0 +1,3 @@
+#ifndef EMULATOR_NAMESPACE
+#define EMULATOR_NAMESPACE emulator
+#endif // EMULATOR_NAMESPACE
