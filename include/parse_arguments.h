@@ -102,7 +102,7 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
       {"lcd", "level_compaction_dynamic"});
 
   args::ValueFlag<int> enable_range_query_compaction_cmd(
-      group1, "enable_range_query_compaction",
+      group1, "rqc_enabled",
       "Enable range query comapaction [def: 0]",
       {"rq", "range_query_compaction"});
 
@@ -205,10 +205,10 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
   env->num_range_queries = num_range_queries_cmd
                                ? args::get(num_range_queries_cmd)
                                : env->num_range_queries;
-  env->enable_range_query_compaction =
+  env->rqc_enabled =
       enable_range_query_compaction_cmd
           ? args::get(enable_range_query_compaction_cmd)
-          : env->enable_range_query_compaction;
+          : env->rqc_enabled;
   env->enable_level_renaming = level_renaming_enabled_cmd
                                    ? args::get(level_renaming_enabled_cmd)
                                    : env->enable_level_renaming;

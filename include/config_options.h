@@ -32,7 +32,7 @@ void configOptions(std::unique_ptr<DBEnv> &env, Options *options,
       env->delete_obsolete_files_period_micros;
   options->allow_mmap_reads = env->allow_mmap_reads;
   options->allow_mmap_writes = env->allow_mmap_writes;
-  options->succinct_kv_trigger = env->succinct_kv_trigger;
+  // options->succinct_kv_trigger = env->succinct_kv_trigger;
 
   switch (env->verbosity) {
   case 0:
@@ -252,9 +252,9 @@ void configOptions(std::unique_ptr<DBEnv> &env, Options *options,
   case 8:
     options->compression = CompressionType::kZSTD;
     break;
-  case 9:
-    options->compression = CompressionType::kZSTDNotFinalCompression;
-    break;
+  // case 9:
+  //   options->compression = CompressionType::kZSTDNotFinalCompression;
+  //   break;
   case 10:
     options->compression = CompressionType::kDisableCompressionOption;
     break;
@@ -320,11 +320,11 @@ void configOptions(std::unique_ptr<DBEnv> &env, Options *options,
   options->inplace_update_support = env->inplace_update_support;
   options->inplace_update_num_locks = env->inplace_update_num_locks;
   options->report_bg_io_stats = env->report_bg_io_stats;
-  options->level_compaction_dynamic_file_size =
-      env->level_compaction_dynamic_level_bytes;
-  options->ignore_max_compaction_bytes_for_input =
-      env->ignore_max_compaction_bytes_for_input;
-  options->max_multi_trivial_move = env->max_multi_trivial_move;
+  // options->level_compaction_dynamic_file_size =
+  //     env->level_compaction_dynamic_level_bytes;
+  // options->ignore_max_compaction_bytes_for_input =
+  //     env->ignore_max_compaction_bytes_for_input;
+  // options->max_multi_trivial_move = env->max_multi_trivial_move;
 #pragma endregion // [ColumnFamilyOptions]
 
 #pragma region[FlushOptions]
@@ -333,14 +333,12 @@ void configOptions(std::unique_ptr<DBEnv> &env, Options *options,
 #pragma endregion // [FlushOptions]
 
 #pragma region[RangeReduce]
-  read_options->enable_range_query_compaction =
-      env->enable_range_query_compaction;
+  // read_options->rqc_enabled = env->rqc_enabled;
+  // read_options->lower_threshold = env->lower_threshold;
+  // read_options->upper_threshold = env->upper_threshold;
+  // read_options->range_query_options->initiate();
 
-  read_options->lower_threshold = env->lower_threshold;
-  read_options->upper_threshold = env->upper_threshold;
-  read_options->range_query_options->initiate();
-
-  options->enable_level_renaming = env->enable_level_renaming;
+  // options->enable_level_renaming = env->enable_level_renaming;
 
 #pragma endregion // [RangeReduce]
 

@@ -1,16 +1,21 @@
 #!/bin/bash
 set -e
 
-PROJECT_ROOT="/home/cc/range-reduce"
-
-cd "$PROJECT_ROOT"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
 git submodule update --init --recursive
+
+if [[ "$(uname)" == "Darwin" ]]; then
+  NPROC="$(sysctl -n hw.ncpu)"
+else
+  NPROC="$(nproc)"
+fi
 
 mkdir -p build
 cd build
 cmake ..
-make -j"${nproc}"
+make -j"$NPROC"
 
 clear
 

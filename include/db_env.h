@@ -209,7 +209,7 @@ public:
       Default::LEVEL0_FILE_NUM_COMPACTION_TRIGGER;
 
   // number of levels for this database
-  int num_levels = 20;
+  int num_levels = 10;
 
   // by default target_file_size_multiplier is 1, which means
   // by default files in different levels will have similar size.
@@ -441,8 +441,8 @@ public:
   size_t num_updates = 0;
   size_t num_range_queries = 0;
 
-  bool enable_range_query_compaction = false; // [re]
-  bool enable_level_renaming = false;         // [rq]
+  bool rqc_enabled = false;           // [re]
+  bool enable_level_renaming = false; // [rq]
 
   float lower_threshold = 0.0f;                              // [lb]
   float upper_threshold = std::numeric_limits<float>::max(); // [ub]

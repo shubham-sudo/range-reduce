@@ -14,12 +14,12 @@ def build_specs(args):
             "op_count": numexpr(args.inserts),
             "key": {"uniform": {"len": key_size}},
             "val": {"uniform": {"len": val_size}},
-        },
+        }
+    }
+    group2 = {
         "point_queries": {
             "op_count": numexpr(args.point_queries),
         },
-    }
-    group2 = {
         "updates": {
             "op_count": numexpr(args.updates),
             "val": {"uniform": {"len": val_size}},

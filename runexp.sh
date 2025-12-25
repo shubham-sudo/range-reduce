@@ -8,15 +8,15 @@ TAG=testing
 ENTRY_SIZE=128
 LAMBDA=0.125
 ENTRIES_PER_PAGE=32
-PAGES_PER_FILE=1024
+PAGES_PER_FILE=16
 SIZE_RATIO=4
 
-INSERTS=1000000
-UPDATES=1000000
-POINT_QUERIES=0
+INSERTS=100000
+UPDATES=100000
+POINT_QUERIES=1000
 POINT_DELETES=0
-RANGE_QUERIES=100
-SELECTIVITY=0.25
+RANGE_QUERIES=1000
+SELECTIVITY=0.1
 RANGE_DELETES=0
 RANGE_DELETES_SEL=0
 
@@ -87,6 +87,7 @@ echo "Benchmarking range-reduce..."
         -B "$ENTRIES_PER_PAGE" \
         -P "$PAGES_PER_FILE" \
         -T "$SIZE_RATIO" \
+        --rq 1\
         --progress "$SHOW_PROGRESS" > LOG.log
 mv db/LOG LOG
 rm -rf db
@@ -103,6 +104,7 @@ echo "Benchmarking rocksdb..."
         -B "$ENTRIES_PER_PAGE" \
         -P "$PAGES_PER_FILE" \
         -T "$SIZE_RATIO" \
+        --rq 0 \
         --progress "$SHOW_PROGRESS" > LOG.log
 mv db/LOG LOG
 rm -rf db
